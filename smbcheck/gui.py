@@ -71,11 +71,12 @@ class ClientDialog:
             ttk.Label(f, text=hint, foreground="#888").grid(row=row, column=2, sticky="w", padx=6)
             row += 1
 
-        ttk.Label(f, text="Ящики для проверки\nна утечки").grid(row=row, column=0, sticky="nw", pady=3)
+        ttk.Label(f, text="Рабочие ящики клиента\n(проверка утечек)").grid(row=row, column=0, sticky="nw", pady=3)
         self.t_emails = tk.Text(f, width=46, height=3, font=("Segoe UI", 9))
         self.t_emails.insert("1.0", "\n".join(c.emails))
         self.t_emails.grid(row=row, column=1, sticky="we", pady=3)
-        ttk.Label(f, text="по одному в строке", foreground="#888").grid(row=row, column=2, sticky="nw", padx=6)
+        ttk.Label(f, text="почта сотрудников клиента,\nнапр. director@romashka.ru;\nнужен ключ HIBP в Настройках",
+                  foreground="#888").grid(row=row, column=2, sticky="nw", padx=6)
         row += 1
         ttk.Label(f, text="Внешний IP офиса").grid(row=row, column=0, sticky="nw", pady=3)
         self.t_ips = tk.Text(f, width=46, height=2, font=("Segoe UI", 9))

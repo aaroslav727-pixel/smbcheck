@@ -6,7 +6,7 @@ import html
 from pathlib import Path
 
 from .models import CATEGORIES, CRITICAL, HIGH, INFO, LOW, MEDIUM, OK, SEVERITY_ORDER, SEVERITY_RU, ScanResult
-from .scoring import Diff, category_status, sort_key, top_actions
+from .scoring import PARTIAL, Diff, category_status, is_gap, sort_key, top_actions
 from .storage import Client, Settings, display_domain
 
 VERDICT = {
@@ -19,10 +19,10 @@ VERDICT = {
 }
 STATUS_TEXT = {
     OK: "В порядке", LOW: "Мелкие замечания", MEDIUM: "Есть риск", HIGH: "Серьёзный риск",
-    CRITICAL: "Критично", "": "Не проверялось",
+    CRITICAL: "Критично", "": "Не проверялось", PARTIAL: "Проверено частично",
 }
 COLORS = {
-    CRITICAL: "#b42318", HIGH: "#d9480f", MEDIUM: "#b7791f", LOW: "#4b6b8a", INFO: "#6b7280", OK: "#1f7a4d", "": "#9ca3af",
+    CRITICAL: "#b42318", HIGH: "#d9480f", MEDIUM: "#b7791f", LOW: "#4b6b8a", INFO: "#6b7280", OK: "#1f7a4d", "": "#9ca3af", PARTIAL: "#8a6d3b",
 }
 GRADE_COLORS = {"A": "#1f7a4d", "B": "#3f7d3a", "C": "#b7791f", "D": "#d9480f", "F": "#b42318"}
 
@@ -93,7 +93,7 @@ def render_html(result: ScanResult, client: Client, settings: Settings, d: Diff 
     status = category_status(result.findings, result.checks_run)
     problems = sorted([f for f in result.findings if f.is_problem], key=sort_key)
     oks = [f for f in result.findings if f.severity == OK]
-    infos = [f for f in result.findings if f.severity == INFO]
+    infos = [f for f in result.findings if f.severity == INFO and not is_gap(f)]
 
     p: list[str] = []
     a = p.append
@@ -133,6 +133,12 @@ def render_html(result: ScanResult, client: Client, settings: Settings, d: Diff 
         a(f"<tr><td><span class='dot' style='background:{COLORS[st]}'></span>{e(label)}</td>"
           f"<td class='st' style='color:{COLORS[st]}'>{STATUS_TEXT[st]}</td></tr>")
     a("</table>")
+    gaps = [f for f in result.findings if is_gap(f) and f.id != "scan.partial"]
+    if gaps:
+        a("<div class='box' style='margin-top:10px'><b>Что проверено не полностью</b><ul>")
+        for f in gaps:
+            a(f"<li>{e(f.title)}" + (f". {e(f.detail)}" if f.detail else "") + "</li>")
+        a("</ul></div>")
 
     if d.score_delta is not None:
         sign = "+" if d.score_delta > 0 else ""

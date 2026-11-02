@@ -317,3 +317,24 @@ def test_offline_scan_not_graded_a(monkeypatch):
     res = run_scan(c, Settings(), ["email", "domain"], resolver=Dead())
     assert res.grade == "?" and res.errors
     assert "неполная" in render_html(res, c, Settings())
+
+
+def test_leaks_partial_status(monkeypatch):
+    from smbcheck.scoring import PARTIAL, category_status
+    monkeypatch.setattr(leaks, "_get", lambda *a, **k: (200, []))
+    # ящики указаны, ключа нет — «Проверено частично», а не «В порядке»
+    fs = leaks.run("a.ru", ["boss@a.ru"], api_key="")
+    assert category_status(fs, ["leaks"])["leaks"] == PARTIAL
+    # ящики не указаны — тоже частично
+    fs2 = leaks.run("a.ru", [], api_key="")
+    assert category_status(fs2, ["leaks"])["leaks"] == PARTIAL
+    # с ключом и чистыми ящиками — в порядке
+    monkeypatch.setattr(leaks, "_get", lambda path, key="", **k: (200, []) if "breaches?" in path else (404, None))
+    fs3 = leaks.run("a.ru", ["boss@a.ru"], api_key="KEY")
+    assert category_status(fs3, ["leaks"])["leaks"] == OK
+    # отчёт объясняет, что не проверено, и не дублирует это в «К сведению»
+    r = ScanResult("a.ru", checks_run=["leaks"], findings=fs, finished="2026-11-02T10:00:00")
+    c = Client("X", "a.ru", consent=Consent(True, "01.11.2026", "", "Д1"))
+    html = render_html(r, c, Settings())
+    assert "Проверено частично" in html and "Что проверено не полностью" in html
+    assert html.count("на утечки не проверялись") == 1

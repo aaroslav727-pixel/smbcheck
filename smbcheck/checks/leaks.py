@@ -78,11 +78,19 @@ def run(domain: str, emails: list[str], api_key: str = "", log=lambda m: None) -
 
     emails = [e.strip() for e in emails if e.strip()]
     if not emails:
+        out.append(Finding("leaks.accounts.skipped", CAT, INFO,
+                           "Рабочие ящики сотрудников не проверялись: список не передан",
+                           detail="Проверено только, не взламывали ли сам сайт.",
+                           fix="Пришлите список рабочих ящиков сотрудников, чтобы в следующий раз проверить и их."))
         return out
     if not api_key:
+        log("Утечки: ящики пропущены — в настройках нет ключа Have I Been Pwned")
         out.append(Finding("leaks.accounts.skipped", CAT, INFO,
-                           "Почтовые ящики на утечки не проверялись",
-                           fix="Укажите ключ Have I Been Pwned в настройках программы."))
+                           f"Рабочие ящики сотрудников ({len(emails)}) на утечки не проверялись",
+                           detail="Проверено только, не взламывали ли сам сайт. "
+                                  "Для проверки ящиков нужен подключённый сервис Have I Been Pwned.",
+                           fix="Подключите ключ Have I Been Pwned в настройках программы.",
+                           tech=", ".join(emails)))
         return out
     results: dict[str, list[dict]] = {}
     for i, email in enumerate(emails):

@@ -43,6 +43,15 @@ def top_actions(findings: list[Finding], n: int = 3) -> list[Finding]:
     return out
 
 
+PARTIAL = "partial"
+
+
+def is_gap(f: Finding) -> bool:
+    """Находка-оговорка: что-то в категории проверить не удалось или не было данных."""
+    return f.severity == "info" and (f.id.endswith((".skipped", ".error", ".unknown")) or
+                                     f.id in ("leaks.key.invalid",) or ".error." in f.id)
+
+
 def category_status(findings: list[Finding], checks_run: list[str]) -> dict[str, str]:
     """Для каждой категории — худшая важность (или '' если не проверялась)."""
     status: dict[str, str] = {}
@@ -51,7 +60,12 @@ def category_status(findings: list[Finding], checks_run: list[str]) -> dict[str,
             status[cat] = ""
             continue
         sevs = [f.severity for f in findings if f.category == cat and f.is_problem]
-        status[cat] = min(sevs, key=SEVERITY_ORDER.index) if sevs else OK
+        if sevs:
+            status[cat] = min(sevs, key=SEVERITY_ORDER.index)
+        elif any(is_gap(f) for f in findings if f.category == cat):
+            status[cat] = PARTIAL  # «в порядке» здесь было бы неправдой
+        else:
+            status[cat] = OK
     return status
 
 
