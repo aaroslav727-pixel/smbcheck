@@ -1,0 +1,60 @@
+SMB Check — Proprietary License (All Rights Reserved)
+
+Copyright (c) 2026 aaroslav727-pixel (aaroslav727@gmail.com). All rights reserved.
+
+This repository, including all source code, documentation, report templates,
+consent form templates, build scripts and any compiled binaries built from it
+(together, the "Software"), is the exclusive property of the copyright holder.
+
+1. VIEWING ONLY. The Software is made publicly visible solely so that it can be
+   read and evaluated. Viewing the Software on GitHub, and the forking that
+   GitHub's Terms of Service allow within GitHub itself, does not grant any
+   license or right to the Software beyond that.
+
+2. RESTRICTIONS. Without the prior written permission of the copyright holder
+   you may NOT, in whole or in part:
+   a) use, run or install the Software, or any compiled version of it;
+   b) copy, reproduce or download the Software, except as needed to view it;
+   c) modify, translate, adapt or create derivative works of the Software;
+   d) distribute, publish, sublicense, sell, rent or lease the Software;
+   e) use the Software, its outputs or its reports to provide paid or free
+      services to third parties (including security checks or audits);
+   f) incorporate the Software or any part of it into another product, service,
+      repository or dataset, including datasets used to train machine-learning
+      models;
+   g) remove or alter this license or any copyright notice.
+
+3. PERMISSION. Licenses for use, including commercial use, can be requested
+   from the copyright holder at aaroslav727@gmail.com. Any permission is valid
+   only if given in writing and only within its stated scope.
+
+4. CONTRIBUTIONS. By submitting a pull request, issue or other contribution to
+   this repository, you agree that the copyright holder may use, modify and
+   distribute your contribution as part of the Software without restriction
+   and without compensation.
+
+5. NO WARRANTY. The Software is provided "as is", without warranty of any kind,
+   express or implied. In no event shall the copyright holder be liable for any
+   claim, damages or other liability arising from the Software or its use.
+
+6. TERMINATION. Any use of the Software in breach of this license is
+   unauthorized and constitutes infringement of the copyright holder's rights.
+
+In case of any discrepancy between this English text and any translation,
+this English text prevails.
+
+---------------------------------------------------------------------------
+
+SMB Check — проприетарная лицензия (все права защищены)
+
+Copyright (c) 2026 aaroslav727-pixel (aaroslav727@gmail.com). Все права защищены.
+
+Код открыт на GitHub только для просмотра. Без письменного разрешения
+правообладателя запрещено: использовать и запускать программу (в том числе
+собранные exe), копировать, изменять, создавать производные работы,
+распространять, продавать, оказывать с её помощью услуги третьим лицам,
+включать её части в другие продукты и наборы данных (в том числе для обучения
+нейросетей), удалять или менять эту лицензию. За разрешением, в том числе на
+коммерческое использование, пишите на aaroslav727@gmail.com. Программа
+предоставляется «как есть», без каких-либо гарантий. При расхождении
+приоритет имеет английский текст выше.
