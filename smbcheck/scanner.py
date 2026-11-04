@@ -5,6 +5,7 @@ import datetime as dt
 import threading
 from typing import Callable
 
+from .checks import brand as brand_chk
 from .checks import domain as domain_chk
 from .checks import email as email_chk
 from .checks import leaks as leaks_chk
@@ -15,13 +16,14 @@ from .models import CRITICAL, INFO, Finding, ScanResult
 from .scoring import score
 from .storage import Client, Settings
 
-ALL_CHECKS = ["email", "web", "domain", "network", "leaks"]
+ALL_CHECKS = ["email", "web", "domain", "network", "leaks", "brand"]
 CHECK_LABELS = {
     "email": "Почта: SPF, DKIM, DMARC",
     "web": "Сайт: сертификат, HTTPS, заголовки, забытые файлы",
     "domain": "Домен: срок регистрации, DNSSEC",
     "network": "Порты: RDP, базы данных, 1С, MikroTik",
     "leaks": "Утечки (Have I Been Pwned)",
+    "brand": "Двойники бренда: похожие домены и сертификаты",
 }
 
 
@@ -79,6 +81,8 @@ def run_scan(client: Client, settings: Settings, checks: list[str] | None = None
         step("network", lambda: network_chk.run(d, resolver, client.office_ips, log))
     if "leaks" in checks:
         step("leaks", lambda: leaks_chk.run(d, client.emails, settings.hibp_key, log))
+    if "brand" in checks:
+        step("brand", lambda: brand_chk.run(d, resolver, client.brand_keywords, client.trusted_domains, log))
 
     if res.errors:
         res.findings.append(Finding("scan.partial", "domain", INFO,

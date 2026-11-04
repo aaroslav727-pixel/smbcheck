@@ -74,6 +74,14 @@ class Consent:
         return ""
 
 
+# Профиль клиента определяет, на какие требования мапится пакет доказательств
+PROFILES = {
+    "general": "Обычный бизнес",
+    "uz_fin": "Финорганизация Узбекистана (МФО, ломбард, платёжная)",
+    "kz_fin": "Финорганизация Казахстана (МФО, платёжная)",
+}
+
+
 @dataclass
 class Client:
     name: str
@@ -84,6 +92,10 @@ class Client:
     office_ips: list[str] = field(default_factory=list)   # внешний IP офиса (роутер)
     notes: str = ""
     consent: Consent = field(default_factory=Consent)
+    profile: str = "general"                              # ключ из PROFILES
+    accepts_cards: bool = False                           # принимает карты на сайте → PCI DSS
+    brand_keywords: list[str] = field(default_factory=list)   # доп. слова для поиска двойников
+    trusted_domains: list[str] = field(default_factory=list)  # свои и проверенные похожие домены
 
     @staticmethod
     def from_dict(d: dict) -> "Client":
@@ -92,6 +104,10 @@ class Client:
         c.emails = list(d.get("emails", []))
         c.office_ips = list(d.get("office_ips", []))
         c.notes = d.get("notes", "")
+        c.profile = d.get("profile", "general") if d.get("profile") in PROFILES else "general"
+        c.accepts_cards = bool(d.get("accepts_cards", False))
+        c.brand_keywords = list(d.get("brand_keywords", []))
+        c.trusted_domains = list(d.get("trusted_domains", []))
         c.consent = Consent(**{k: v for k, v in (d.get("consent") or {}).items() if k in Consent.__dataclass_fields__})
         return c
 
@@ -140,23 +156,38 @@ class Store:
         self.settings_file.write_text(json.dumps(asdict(s), ensure_ascii=False, indent=2), "utf-8")
 
     # ---- история
-    def _client_hist(self, client_id: str) -> Path:
+    # Полные проверки — history/<id>/*.json; ежедневные проверки двойников — history/<id>/brand/*.json,
+    # чтобы частые короткие прогоны не ломали сравнение «месяц к месяцу».
+    def _client_hist(self, client_id: str, kind: str = "full") -> Path:
         p = self.history_dir / client_id
+        if kind == "brand":
+            p = p / "brand"
         p.mkdir(parents=True, exist_ok=True)
         return p
 
-    def save_scan(self, client_id: str, result: ScanResult) -> Path:
-        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        p = self._client_hist(client_id) / f"{stamp}.json"
+    def save_scan(self, client_id: str, result: ScanResult, kind: str = "full") -> Path:
+        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        p = self._client_hist(client_id, kind) / f"{stamp}.json"
         p.write_text(json.dumps(result.to_dict(), ensure_ascii=False, indent=2), "utf-8")
         return p
 
-    def history(self, client_id: str) -> list[ScanResult]:
+    def history(self, client_id: str, kind: str = "full") -> list[ScanResult]:
         d = self.history_dir / client_id
+        if kind == "brand":
+            d = d / "brand"
         if not d.exists():
             return []
         return [ScanResult.from_dict(json.loads(f.read_text("utf-8"))) for f in sorted(d.glob("*.json"))]
 
     def last_scan(self, client_id: str) -> ScanResult | None:
         h = self.history(client_id)
+        return h[-1] if h else None
+
+    def all_scans(self, client_id: str) -> list[ScanResult]:
+        """Полные и ежедневные проверки вместе, по времени — для пакета доказательств."""
+        return sorted(self.history(client_id) + self.history(client_id, "brand"), key=lambda r: r.finished)
+
+    def last_with(self, client_id: str, check: str) -> ScanResult | None:
+        """Самая свежая проверка (любого вида), где выполнялась проверка check."""
+        h = [r for r in self.all_scans(client_id) if check in r.checks_run]
         return h[-1] if h else None

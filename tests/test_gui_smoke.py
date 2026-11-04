@@ -71,7 +71,7 @@ def fake_tk():
     tk.Toplevel = W
     ttk = types.ModuleType("tkinter.ttk")
     for name in ("Frame", "Label", "Entry", "Button", "Checkbutton", "LabelFrame", "Separator",
-                 "PanedWindow", "Scrollbar", "Progressbar", "Style"):
+                 "PanedWindow", "Scrollbar", "Progressbar", "Style", "Combobox"):
         setattr(ttk, name, W)
     ttk.Treeview = Tree
     mb = types.ModuleType("tkinter.messagebox")
@@ -171,3 +171,39 @@ def test_bad_inputs(gui, tmp_path, monkeypatch):
     d.v_domain.set("x.ru")
     d.t_ips.insert("1.0", "192.168.1.1")
     assert d._collect(strict=True) is None  # внутренний адрес отклоняется
+
+
+def test_gui_fin_flow(gui, tmp_path, monkeypatch):
+    from smbcheck.models import HIGH, Finding, ScanResult
+    from smbcheck.storage import Client, Consent, Store
+    st = Store(tmp_path)
+    st.save_clients([Client("МФО", "tez.uz", consent=Consent(True, "01.11.2026", "", "Д1"), profile="uz_fin")])
+    app = gui.App(st)
+    app.root.wait_window = lambda w: None
+    c = app.clients[0]
+
+    # карточка: тип клиента и доверенные домены сохраняются
+    d = gui.ClientDialog(app.root, c, app.settings)
+    assert d.v_profile.get().startswith("Финорганизация Узбекистана")
+    d.t_trusted.insert("1.0", "https://tez.com/")
+    d.v_keywords.set("Tez, TezPay")
+    got = d._collect(strict=True)
+    assert got.profile == "uz_fin" and got.trusted_domains == ["tez.com"] and got.brand_keywords == ["tez", "tezpay"]
+
+    # быстрая проверка двойников уходит в отдельную историю и готовит черновики уведомлений
+    res = ScanResult("tez.uz", finished="2026-11-04T10:00:00", checks_run=["brand"],
+                     findings=[Finding("brand.lookalike.tez-pay.uz", "brand", HIGH, "Домен-двойник: tez-pay.uz")])
+    seen = []
+    monkeypatch.setattr(gui, "run_scan", lambda cl, s, checks, **k: seen.append(checks) or res)
+    app.tree.selection_set(c.id)
+    app.scan_brand()
+    app.worker.join(5)
+    app._poll()
+    assert seen == [["brand"]]
+    assert app.store.last_scan(c.id) is None and app.store.last_with(c.id, "brand") is not None
+    assert list((tmp_path / "reports" / "уведомления").glob("*.html"))
+
+    app.evidence()
+    app.notices()
+    app.demo_fin()
+    assert len(gui._opened) == 4

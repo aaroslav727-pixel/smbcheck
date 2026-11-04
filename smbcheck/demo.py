@@ -84,3 +84,52 @@ def demo_results() -> tuple[ScanResult, ScanResult]:
                      findings=cur_findings, checks_run=["email", "web", "domain", "network", "leaks"])
     cur.score, cur.grade = score(cur.findings)
     return cur, prev
+
+
+# ---------------------------------------------------------------- пример для финорганизации
+
+FIN_DOMAIN = "tezkredit-demo.uz"
+
+
+def _brand(name: str, sev: str, how: str, state: str, tech: str) -> Finding:
+    return _f(f"brand.lookalike.{name}", "brand", sev, f"Домен-двойник: {name}",
+              detail=f"Как получен: {how}. Состояние: {state}.",
+              why="Похожие домены используют для фишинга: клиенты вводят логин, данные карты или код из SMS на чужом сайте.",
+              fix="Проверьте домен в изолированной среде. Если это подделка — уведомление регулятору (в течение 24 часов), "
+                  "жалоба регистратору и предупреждение клиентов.",
+              tech=tech)
+
+
+def demo_fin() -> tuple[Client, list[ScanResult]]:
+    """МФО из Узбекистана: три ежемесячные проверки и ежедневный мониторинг двойников."""
+    c = Client("МФО «ТезКредит» (пример)", FIN_DOMAIN, contact="Дилшод, комплаенс, +998 90 000-00-00",
+               emails=["info@tezkredit-demo.uz"], consent=Consent(True, "01.08.2026", "", "Договор № 7/2026"),
+               profile="uz_fin", accepts_cards=True, brand_keywords=["tezkredit"])
+    now = dt.datetime.now().replace(microsecond=0)
+    base_cur, base_prev = demo_results()
+    scans: list[ScanResult] = []
+    for months_ago, src in ((2, base_prev), (1, base_prev), (0, base_cur)):
+        t = now - dt.timedelta(days=30 * months_ago)
+        fs = [Finding.from_dict({k: (v.replace("romashka-demo.ru", FIN_DOMAIN) if isinstance(v, str) else v)
+                                 for k, v in f.to_dict().items()}) for f in src.findings]
+        if months_ago == 0:
+            fs.append(_brand("tezkredit-online.uz", HIGH, "добавлено слово", "работает сайт и настроена почта",
+                             "A: 45.12.88.10; MX: mx.tezkredit-online.uz; регистратор: Example Registrar; создан: "
+                             + (now - dt.timedelta(days=3)).strftime("%d.%m.%Y")))
+            fs.append(_brand("tezkredit.top", MEDIUM, "другая зона .top", "на нём работает сайт", "A: 104.21.3.7"))
+        else:
+            fs.append(_f("brand.lookalike.ok", "brand", OK, "Зарегистрированных двойников не найдено (180 вариантов)"))
+        r = ScanResult(FIN_DOMAIN, c.name, started=t.isoformat(), finished=t.isoformat(), findings=fs,
+                       checks_run=["email", "web", "domain", "network", "leaks", "brand"])
+        r.score, r.grade = score(r.findings)
+        scans.append(r)
+    for days_ago in range(20, 0, -1):  # ежедневные прогоны двойников
+        t = now - dt.timedelta(days=days_ago, hours=-2)
+        fs = [_f("brand.lookalike.ok", "brand", OK, "Зарегистрированных двойников не найдено")]
+        if days_ago <= 3:
+            fs = [_brand("tezkredit-online.uz", HIGH, "добавлено слово", "работает сайт и настроена почта",
+                         "A: 45.12.88.10; MX: mx.tezkredit-online.uz")]
+        scans.append(ScanResult(FIN_DOMAIN, c.name, started=t.isoformat(), finished=t.isoformat(),
+                                findings=fs, checks_run=["brand"]))
+    scans.sort(key=lambda s: s.finished)
+    return c, scans
