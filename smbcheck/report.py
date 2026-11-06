@@ -177,8 +177,9 @@ def phishing_section(result: ScanResult, client: Client) -> str:
             c, v = COLORS[HIGH], f"Найдено: {len(lookalikes)}"
             d = f"Из них с сайтом или почтой — {len(hot)}. Список ниже."
         elif lookalikes:
-            c, v = COLORS[LOW], f"Зарегистрировано: {len(lookalikes)}"
-            d = "Сайта и почты на них пока нет или они припаркованы — продолжаем следить."
+            c, v = COLORS[LOW], f"Заняты: {len(lookalikes)}, признаков фишинга нет"
+            d = ("Похожие адреса кем-то зарегистрированы, но они пустые, продаются или давно принадлежат "
+                 "другим. Сообщим, если на них появится почта или сменится владелец.")
         elif sm["unresolved"]:
             c, v = COLORS[PARTIAL], "Проверено частично"
             d = (f"Проверено {n_ok} из {sm['checked']} вариантов, двойников среди них нет. "

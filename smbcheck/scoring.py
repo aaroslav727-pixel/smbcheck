@@ -95,9 +95,14 @@ def diff(current: ScanResult, previous: ScanResult | None) -> Diff:
         for f in sorted((f for f in src.findings if f.is_problem and f.category in common), key=sort_key):
             dst.setdefault(family(f), f)  # худшая находка в семействе
     rank = SEVERITY_ORDER.index
+    # если в прошлый раз часть вариантов двойников не проверилась, «новый» двойник может быть старым
+    prev_partial = any(f.id == "brand.summary" and "unresolved=0;" not in f.tech for f in previous.findings)
     new, fixed = [], []
     for k, f in cur.items():
         if k not in prev:
+            if prev_partial and f.id.startswith("brand.lookalike."):
+                f = Finding(f.id, f.category, f.severity,
+                            f"{f.title} — впервые удалось проверить (в прошлый раз проверка двойников была неполной)")
             new.append(f)
         elif rank(f.severity) < rank(prev[k].severity):
             new.append(Finding(f.id, f.category, f.severity, f"Ухудшилось: {f.title}"))

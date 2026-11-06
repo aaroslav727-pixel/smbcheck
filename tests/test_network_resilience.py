@@ -127,3 +127,37 @@ def test_report_phishing_section_found():
     assert "romashka-demo-online.ru (зарегистрирован 4 дн. назад)" in html and "Что делать с найденным" in html
     details = html.split("<h2>Подробности</h2>", 1)[1]
     assert "romashka-demo-online" not in details      # двойники не дублируются в «Подробностях»
+
+
+def test_old_and_for_sale_lookalikes_are_low():
+    import datetime as dt
+    from smbcheck.models import HIGH, LOW, MEDIUM
+    now = dt.datetime(2026, 11, 6, tzinfo=dt.timezone.utc)
+    old = now - dt.timedelta(days=365 * 9)
+    hits = [
+        brand.Hit("ideplus.com", "пропущена буква", ips=["1.2.3.4"], created=old),                    # продаётся/чужой
+        brand.Hit("izdepluss.com", "удвоена буква", ips=["1.2.3.4"], mx=["mx.x"], created=old),       # давний, с почтой
+        brand.Hit("izdeplus.net", "другая зона", ips=["1.2.3.4"], ns=["ns1.afternic.com"]),           # на площадке продажи
+        brand.Hit("izdeplus-pay.com", "добавлено слово", ips=["1.2.3.4"], created=now - dt.timedelta(days=3)),
+    ]
+    fs = {f.id.split(".", 2)[2]: f for f in brand.analyze_hits(hits, 150, now)}
+    assert fs["ideplus.com"].severity == LOW and fs["ideplus.com"].title == "Похожий домен: ideplus.com"
+    assert "9 лет" in fs["ideplus.com"].detail and "продажу" in fs["ideplus.com"].detail
+    assert fs["izdepluss.com"].severity == MEDIUM and "другая компания" in fs["izdepluss.com"].detail
+    assert fs["izdeplus.net"].severity == LOW and "припаркован" in fs["izdeplus.net"].detail
+    assert fs["izdeplus-pay.com"].severity == HIGH and fs["izdeplus-pay.com"].title.startswith("Домен-двойник")
+    assert brand._years(1) == "год" and brand._years(3) == "года" and brand._years(11) == "лет"
+
+
+def test_diff_marks_lookalike_after_partial_scan():
+    from smbcheck.models import LOW
+    from smbcheck.scoring import diff
+    prev = ScanResult("izdeplus.com", checks_run=["brand"],
+                      findings=[brand.summary(150, 69, 0, "error", 0, ["izdeplus"])])
+    cur = ScanResult("izdeplus.com", checks_run=["brand"],
+                     findings=[brand.summary(150, 0, 1, "ok", 0, ["izdeplus"]),
+                               Finding("brand.lookalike.ideplus.com", "brand", LOW, "Похожий домен: ideplus.com")])
+    [f] = diff(cur, prev).new
+    assert "впервые удалось проверить" in f.title
+    prev_full = ScanResult("izdeplus.com", checks_run=["brand"], findings=[brand.summary(150, 0, 0, "ok", 0, [])])
+    assert diff(cur, prev_full).new[0].title == "Похожий домен: ideplus.com"

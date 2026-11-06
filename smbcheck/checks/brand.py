@@ -40,8 +40,13 @@ HOMOGLYPHS = {
     "d": ["cl"], "cl": ["d"], "u": ["v"], "v": ["u"],
 }
 _ROWS = ["1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"]
+# DNS-серверы площадок, где домены паркуют и продают. Сайт на них — это страница «домен продаётся»,
+# а не фишинг. GoDaddy (domaincontrol.com) и Namecheap сюда не входят: у них же живут обычные сайты.
 PARKING_NS = ("sedoparking", "bodis", "parkingcrew", "above.com", "dan.com", "afternic", "hugedomains",
-              "parklogic", "domainparking", "parking")
+              "parklogic", "domainparking", "parking", "parked", "uniregistrymarket", "undeveloped", "domainmarket",
+              "brandbucket", "efty", "namebrightdns", "fabulous.com", "rookdns", "dnparking", "smartname",
+              "atom.com", "squadhelp", "buydomains", "domainnamesales", "voodoo.com", "trafficz", "ztomy")
+OLD_DAYS = 365             # домену больше года — скорее чужой проект или товар инвестора, чем свежий фишинг
 
 LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
@@ -314,6 +319,12 @@ def _issuer_org(issuer: str) -> str:
 
 # ----------------------------------------------------------------------- анализ
 
+def _years(n: int) -> str:
+    if n % 10 == 1 and n % 100 != 11:
+        return "год"
+    return "года" if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else "лет"
+
+
 def analyze_hits(hits: list[Hit], checked: int, now: dt.datetime | None = None) -> list[Finding]:
     now = now or dt.datetime.now(dt.timezone.utc)
     out: list[Finding] = []
@@ -331,9 +342,19 @@ def analyze_hits(hits: list[Hit], checked: int, now: dt.datetime | None = None) 
             sev, what = MEDIUM, "на нём работает сайт"
         else:
             sev, what = LOW, "зарегистрирован, но сайта и почты пока нет"
+        old = age is not None and age > OLD_DAYS
+        if old and not h.parked:
+            years = age // 365
+            since = f"домену {years} {_years(years)}, создан в {h.created.year} г."
+            if sev == MEDIUM:          # только сайт, без почты
+                sev, what = LOW, (f"на нём есть сайт, но {since} — скорее всего, это чужой проект или домен, "
+                                  "выставленный на продажу; следим, не появится ли почта или новый владелец")
+            elif sev == HIGH:          # сайт/почта на давнем домене — возможно, компания с похожим названием
+                sev, what = MEDIUM, (f"{what}; {since} — возможно, это другая компания с похожим названием, "
+                                     "проверьте сайт")
         if fresh and sev in (MEDIUM, LOW):
             sev = HIGH if h.ips or h.mx else MEDIUM
-        title = f"Домен-двойник: {h.name}"
+        title = f"{'Домен-двойник' if sev in (HIGH, MEDIUM) else 'Похожий домен'}: {h.name}"
         if fresh:
             title += f" (зарегистрирован {age} дн. назад)"
         if not h.mx_known:

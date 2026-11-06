@@ -109,7 +109,7 @@ class ClientDialog:
         self.t_trusted = tk.Text(pf, width=40, height=2, font=("Segoe UI", 9))
         self.t_trusted.insert("1.0", "\n".join(c.trusted_domains))
         self.t_trusted.grid(row=3, column=1, sticky="w", pady=3)
-        ttk.Label(pf, text="не считать двойниками", foreground="#888").grid(row=3, column=2, sticky="nw", padx=6)
+        ttk.Label(pf, text="не считать двойниками\n(в т.ч. чужие домены на продаже)", foreground="#888").grid(row=3, column=2, sticky="nw", padx=6)
         row += 1
 
         cf = ttk.LabelFrame(f, text=" Письменное согласие владельца (без него проверка не запустится) ", padding=10)

@@ -93,7 +93,7 @@ def demo_results() -> tuple[ScanResult, ScanResult]:
                   "поддельную страницу, и рассылать письма.",
            tech="A: 45.12.88.10; MX: mx.romashka-demo-online.ru; регистратор: Example Registrar; "
                 "жалобы: abuse@registrar.example"),
-        _f("brand.lookalike.romashka-demo.com", "brand", LOW, "Домен-двойник: romashka-demo.com",
+        _f("brand.lookalike.romashka-demo.com", "brand", LOW, "Похожий домен: romashka-demo.com",
            detail="Как получен: другая зона .com. Состояние: припаркован (выставлен на продажу или не используется).",
            tech="NS: ns1.sedoparking.com"),
         _f("brand.ct.ok.romashka-demo", "brand", OK, "Чужих сертификатов с «romashka-demo» не найдено"),
