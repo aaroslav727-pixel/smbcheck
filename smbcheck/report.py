@@ -115,6 +115,17 @@ def render_html(result: ScanResult, client: Client, settings: Settings, d: Diff 
         a("<p class='box' style='margin-top:10px'><b>Проверка неполная.</b> Не выполнились: "
           + e("; ".join(x.split(":")[0] for x in result.errors)) + ". Оценка учитывает только выполненные проверки.</p>")
 
+    brand = [f for f in problems if f.category == "brand"]
+    if "brand" in result.checks_run:
+        if brand:
+            hi = sum(1 for f in brand if f.severity in (CRITICAL, HIGH))
+            a(f"<p class='box' style='margin-top:10px;border-left:4px solid {COLORS[HIGH]}'><b>Найдены двойники бренда: "
+              f"{len(brand)}</b>" + (f", из них с сайтом или почтой — {hi}" if hi else "") +
+              ". Это не ваши настройки, поэтому на оценку не влияет, но через такие домены обманывают ваших клиентов. "
+              "Список — в разделе «Подробности», черновики жалоб и уведомлений — отдельным документом.</p>")
+        else:
+            a("<p class='box' style='margin-top:10px'>Двойников бренда не найдено.</p>")
+
     a("<h2>Что сделать в этом месяце</h2>")
     if actions:
         a("<ol class='actions'>")
@@ -197,6 +208,9 @@ def summary_text(result: ScanResult, client: Client, d: Diff | None = None) -> s
     if d.score_delta is not None:
         sign = "+" if d.score_delta > 0 else ""
         lines.append(f"С прошлого раза: {sign}{d.score_delta}, исправлено {len(d.fixed)}, новых {len(d.new)}.")
+    brand = [f for f in result.findings if f.category == "brand" and f.is_problem]
+    if brand:
+        lines.append(f"Найдены похожие домены (возможный фишинг): {len(brand)} — список в отчёте.")
     acts = top_actions(result.findings, 3)
     if acts:
         lines.append("")

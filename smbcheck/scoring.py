@@ -3,16 +3,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .models import CATEGORIES, CRITICAL, HIGH, LOW, MEDIUM, OK, SEVERITY_ORDER, Finding, ScanResult  # noqa: F401
+from .models import CATEGORIES, CRITICAL, HIGH, LOW, MEDIUM, NOT_SCORED, OK, SEVERITY_ORDER, Finding, ScanResult  # noqa: F401
 
 # Первая находка уровня — полный штраф, каждая следующая — поменьше,
 # чтобы оценка не упиралась в ноль и прогресс от месяца к месяцу был виден.
 PENALTY = {CRITICAL: (30, 12), HIGH: (15, 6), MEDIUM: (6, 3), LOW: (2, 1)}
 # При равной важности сначала то, что чаще приводит к реальным потерям
-CATEGORY_PRIORITY = ["network", "leaks", "email", "domain", "web"]
+CATEGORY_PRIORITY = ["network", "leaks", "email", "domain", "web", "brand"]
 
 
 def score(findings: list[Finding]) -> tuple[int, str]:
+    findings = [f for f in findings if f.category not in NOT_SCORED]
     counts: dict[str, int] = {}
     for f in findings:
         if f.severity in PENALTY:
@@ -33,7 +34,7 @@ def sort_key(f: Finding) -> tuple[int, int]:
 def top_actions(findings: list[Finding], n: int = 3) -> list[Finding]:
     seen_fix: set[str] = set()
     out: list[Finding] = []
-    for f in sorted((f for f in findings if f.is_problem), key=sort_key):
+    for f in sorted((f for f in findings if f.is_problem and f.category not in NOT_SCORED), key=sort_key):
         if f.fix in seen_fix:
             continue
         seen_fix.add(f.fix)
@@ -79,7 +80,7 @@ class Diff:
 
 def family(f: Finding) -> str:
     """Одна и та же проблема в разных состояниях: email.dmarc.missing и email.dmarc.none — это «DMARC»."""
-    if f.category in ("network", "leaks") or f.id.startswith("web.exposed."):
+    if f.category in ("network", "leaks", "brand") or f.id.startswith("web.exposed."):
         return f.id
     return ".".join(f.id.split(".")[:2])
 

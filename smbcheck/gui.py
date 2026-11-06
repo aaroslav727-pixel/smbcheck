@@ -15,12 +15,13 @@ from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from . import APP_NAME, __version__
+from .compliance import brand_cases, save_evidence, save_notices
 from .consent import save_consent
-from .demo import demo_client, demo_results
+from .demo import demo_client, demo_fin, demo_results
 from .report import save_report, summary_text
 from .scanner import ALL_CHECKS, CHECK_LABELS, Cancelled, ConsentError, run_scan
 from .scoring import diff
-from .storage import Client, Consent, Settings, Store, display_domain, normalize_domain
+from .storage import PROFILES, Client, Consent, Settings, Store, display_domain, normalize_domain
 
 
 def open_path(path: Path) -> None:
@@ -91,6 +92,26 @@ class ClientDialog:
         self.t_notes.grid(row=row, column=1, sticky="we", pady=3)
         row += 1
 
+        pf = ttk.LabelFrame(f, text=" Финорганизациям: пакет для проверки и двойники бренда ", padding=10)
+        pf.grid(row=row, column=0, columnspan=3, sticky="we", pady=(12, 4))
+        self.v_profile = tk.StringVar(value=PROFILES.get(c.profile, PROFILES["general"]))
+        ttk.Label(pf, text="Тип клиента").grid(row=0, column=0, sticky="w", pady=3)
+        ttk.Combobox(pf, textvariable=self.v_profile, values=list(PROFILES.values()), state="readonly", width=52) \
+            .grid(row=0, column=1, columnspan=2, sticky="w", pady=3)
+        self.v_cards = tk.BooleanVar(value=c.accepts_cards)
+        ttk.Checkbutton(pf, text="Принимает банковские карты на сайте (добавить темы PCI DSS)", variable=self.v_cards) \
+            .grid(row=1, column=0, columnspan=3, sticky="w")
+        self.v_keywords = tk.StringVar(value=", ".join(c.brand_keywords))
+        ttk.Label(pf, text="Слова бренда").grid(row=2, column=0, sticky="w", pady=3)
+        ttk.Entry(pf, textvariable=self.v_keywords, width=40).grid(row=2, column=1, sticky="w", pady=3)
+        ttk.Label(pf, text="латиницей, через запятую", foreground="#888").grid(row=2, column=2, sticky="w", padx=6)
+        ttk.Label(pf, text="Свои и проверенные\nпохожие домены").grid(row=3, column=0, sticky="nw", pady=3)
+        self.t_trusted = tk.Text(pf, width=40, height=2, font=("Segoe UI", 9))
+        self.t_trusted.insert("1.0", "\n".join(c.trusted_domains))
+        self.t_trusted.grid(row=3, column=1, sticky="w", pady=3)
+        ttk.Label(pf, text="не считать двойниками", foreground="#888").grid(row=3, column=2, sticky="nw", padx=6)
+        row += 1
+
         cf = ttk.LabelFrame(f, text=" Письменное согласие владельца (без него проверка не запустится) ", padding=10)
         cf.grid(row=row, column=0, columnspan=3, sticky="we", pady=(12, 4))
         self.v_has = tk.BooleanVar(value=c.consent.has)
@@ -153,10 +174,15 @@ class ClientDialog:
                 except ValueError:
                     messagebox.showwarning(APP_NAME, f"{label}: формат ДД.ММ.ГГГГ", parent=self.win)
                     return None
+        trusted = [normalize_domain(x) or x.lower() for x in _lines(self.t_trusted.get("1.0", "end"))]
+        profile = next((k for k, v in PROFILES.items() if v == self.v_profile.get()), "general")
         c = Client(name=name, domain=domain, contact=self.v_contact.get().strip(),
                    emails=emails, office_ips=ips, notes=self.t_notes.get("1.0", "end").strip(),
                    consent=Consent(self.v_has.get(), self.v_cdate.get().strip(), self.v_cuntil.get().strip(),
-                                   self.v_cdoc.get().strip()))
+                                   self.v_cdoc.get().strip()),
+                   profile=profile, accepts_cards=bool(self.v_cards.get()),
+                   brand_keywords=[k.lower() for k in _lines(self.v_keywords.get())],
+                   trusted_domains=trusted)
         if self.src:
             c.id = self.src.id
         return c
@@ -266,6 +292,7 @@ class App:
             ttk.Button(bar, text=text, command=cmd).pack(side="left", padx=(0, 6))
         ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=8)
         ttk.Button(bar, text="Пример отчёта", command=self.demo).pack(side="left", padx=(0, 6))
+        ttk.Button(bar, text="Пример пакета МФО", command=self.demo_fin).pack(side="left", padx=(0, 6))
         ttk.Button(bar, text="Папка отчётов", command=lambda: open_path(self.settings.reports_path())) \
             .pack(side="left", padx=(0, 6))
         ttk.Button(bar, text="Настройки", command=self.open_settings).pack(side="right")
@@ -333,6 +360,14 @@ class App:
         self.btn_report.pack(side="left")
         self.btn_copy = ttk.Button(rb, text="Текст для мессенджера", command=self.copy_text, state="disabled")
         self.btn_copy.pack(side="left", padx=6)
+        rb2 = ttk.Frame(info)
+        rb2.pack(anchor="w", pady=(4, 0))
+        self.btn_pack = ttk.Button(rb2, text="Пакет для проверки", command=self.evidence, state="disabled")
+        self.btn_pack.pack(side="left")
+        self.btn_notice = ttk.Button(rb2, text="Уведомления по двойникам", command=self.notices, state="disabled")
+        self.btn_notice.pack(side="left", padx=6)
+        self.btn_brand = ttk.Button(right, text="Только двойники (быстро, можно каждый день)", command=self.scan_brand)
+        self.btn_brand.pack(anchor="w", pady=(6, 0))
 
         ttk.Label(right, text="Журнал").pack(anchor="w", pady=(8, 2))
         self.log = ScrolledText(right, height=10, font=("Consolas", 9), state="disabled", wrap="word")
@@ -368,6 +403,8 @@ class App:
             self.lbl_score.configure(text="")
             self.btn_report.configure(state="disabled")
             self.btn_copy.configure(state="disabled")
+            self.btn_pack.configure(state="disabled")
+            self.btn_notice.configure(state="disabled")
             return
         c = sel[0]
         self.lbl_client.configure(text=f"{c.name} — {display_domain(c.domain)}")
@@ -387,6 +424,9 @@ class App:
         has_report = c.id in self.last_report or last is not None
         self.btn_report.configure(state="normal" if has_report else "disabled")
         self.btn_copy.configure(state="normal" if has_report else "disabled")
+        any_scan = has_report or bool(self.store.history(c.id, "brand"))
+        self.btn_pack.configure(state="normal" if any_scan else "disabled")
+        self.btn_notice.configure(state="normal" if any_scan else "disabled")
 
     def _log(self, msg: str) -> None:
         self.log.configure(state="normal")
@@ -398,6 +438,7 @@ class App:
         st = "disabled" if busy else "normal"
         self.btn_scan.configure(state=st)
         self.btn_all.configure(state=st)
+        self.btn_brand.configure(state=st)
         self.btn_stop.configure(state="normal" if busy else "disabled")
         if busy:
             self.progress.start(12)
@@ -466,7 +507,14 @@ class App:
         if messagebox.askyesno(APP_NAME, msg):
             self._start(ok)
 
-    def _start(self, clients: list[Client]) -> None:
+    def scan_brand(self) -> None:
+        sel = self._selected() or [c for c in self.clients if not c.consent.problem()]
+        if not sel:
+            messagebox.showinfo(APP_NAME, "Нет клиентов с действующим согласием.")
+            return
+        self._start(sel, ["brand"])
+
+    def _start(self, clients: list[Client], only: list[str] | None = None) -> None:
         blocked = [(c, c.consent.problem()) for c in clients if c.consent.problem()]
         if blocked:
             text = "\n".join(f"• {c.name}: {p}" for c, p in blocked)
@@ -475,7 +523,7 @@ class App:
             clients = [c for c in clients if not c.consent.problem()]
         if not clients:
             return
-        checks = [c for c, v in self.v_checks.items() if v.get()]
+        checks = only or [c for c, v in self.v_checks.items() if v.get()]
         if not checks:
             messagebox.showinfo(APP_NAME, "Отметьте хотя бы одну проверку.")
             return
@@ -493,10 +541,20 @@ class App:
                 break
             log(f"=== {c.name} ({display_domain(c.domain)}) ===")
             try:
-                prev = self.store.last_scan(c.id)
+                brand_only = checks == ["brand"]
+                prev = self.store.last_with(c.id, "brand") if brand_only else self.store.last_scan(c.id)
                 res = run_scan(c, settings, checks, log=log, cancel=self.cancel)
                 d = diff(res, prev)
-                self.store.save_scan(c.id, res)
+                self.store.save_scan(c.id, res, "brand" if brand_only else "full")
+                new_brand = [f for f in d.new if f.category == "brand"] if prev else \
+                    [f for f in res.findings if f.category == "brand" and f.is_problem]
+                if new_brand:
+                    notice = save_notices(c, settings, brand_cases(self.store.all_scans(c.id)))
+                    log(f"⚠ Новые двойники: {len(new_brand)}. Черновики уведомлений: {notice}")
+                if brand_only:
+                    log(f"Двойники: активных {sum(1 for f in res.findings if f.category == 'brand' and f.is_problem)}")
+                    self.q.put(("finished_one",))
+                    continue
                 path = save_report(res, c, settings, d)
                 self.q.put(("done", c.id, path, summary_text(res, c, d)))
                 log(f"Отчёт: {path}")
@@ -520,6 +578,8 @@ class App:
                     _, cid, path, text = msg
                     self.last_report[cid] = path
                     self.last_text[cid] = text
+                    self._refresh()
+                elif kind == "finished_one":
                     self._refresh()
                 elif kind == "finished":
                     self._busy(False)
@@ -555,6 +615,28 @@ class App:
                 self.root.clipboard_clear()
                 self.root.clipboard_append(r[1])
                 self._log("Текст для клиента скопирован в буфер обмена.")
+
+    def evidence(self) -> None:
+        sel = self._selected()
+        if len(sel) == 1:
+            path = save_evidence(sel[0], self.settings, self.store.all_scans(sel[0].id))
+            self._log(f"Пакет доказательств: {path}")
+            open_path(path)
+
+    def notices(self) -> None:
+        sel = self._selected()
+        if len(sel) != 1:
+            return
+        cases = [x for x in brand_cases(self.store.all_scans(sel[0].id)) if x.active]
+        if not cases:
+            messagebox.showinfo(APP_NAME, "Активных двойников по последней проверке нет.")
+            return
+        open_path(save_notices(sel[0], self.settings, cases))
+
+    def demo_fin(self) -> None:
+        c, scans = demo_fin()
+        open_path(save_evidence(c, self.settings, scans))
+        open_path(save_notices(c, self.settings, brand_cases(scans)))
 
     def demo(self) -> None:
         c = demo_client()
