@@ -22,7 +22,8 @@ CAT = "brand"
 
 MAX_CANDIDATES = 400
 MAX_REPORTED = 25          # больше в отчёт не выводим, остальное — одной строкой
-WORKERS = 16
+WORKERS = 8                # больше — и слабые сети/резолверы начинают терять запросы
+RETRY_WORKERS = 3
 NEW_DAYS = 30              # «свежая» регистрация — самый частый признак фишинга
 
 # Зоны, которые чаще всего берут под фишинг в СНГ и Центральной Азии
@@ -135,6 +136,7 @@ class Hit:
     created: dt.datetime | None = None
     registrar: str = ""
     abuse: str = ""
+    mx_known: bool = True
 
     @property
     def parked(self) -> bool:
@@ -147,7 +149,10 @@ def probe(name: str, how: str, resolver: Resolver) -> Hit | None:
     if a.nxdomain:
         return None
     h = Hit(name, how, ips=[str(x) for x in a.of("A")])
-    h.mx = [str(m[1]) for m in resolver.query(name, "MX").of("MX") if isinstance(m, tuple) and m[1]]
+    try:
+        h.mx = [str(m[1]) for m in resolver.query(name, "MX").of("MX") if isinstance(m, tuple) and m[1]]
+    except DNSError:
+        h.mx_known = False          # домен точно существует; про почту скажем «не удалось проверить»
     try:
         h.ns = [str(x) for x in resolver.query(name, "NS").of("NS")]
     except DNSError:
@@ -159,22 +164,34 @@ def scan_lookalikes(candidates: list[tuple[str, str]], resolver: Resolver,
                     log=lambda m: None) -> tuple[list[Hit], int]:
     """Возвращает (зарегистрированные двойники, число ошибок DNS)."""
     hits: list[Hit] = []
-    errors = 0
+    failed: list[tuple[str, str]] = []
 
     def one(item: tuple[str, str]):
         try:
-            return probe(item[0], item[1], resolver), False
+            return item, probe(item[0], item[1], resolver), False
         except DNSError:
-            return None, True
+            return item, None, True
 
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-        for i, (hit, err) in enumerate(ex.map(one, candidates), 1):
-            errors += err
-            if hit:
+        for i, (item, hit, err) in enumerate(ex.map(one, candidates), 1):
+            if err:
+                failed.append(item)
+            elif hit:
                 hits.append(hit)
             if i % 100 == 0:
                 log(f"Двойники: проверено {i} из {len(candidates)}…")
-    return hits, errors
+    if failed:  # второй, медленный проход: на перегруженной сети большая часть отвечает со второго раза
+        log(f"Двойники: повторяю {len(failed)} вариантов, на которые DNS не ответил…")
+        retry, failed = failed, []
+        with ThreadPoolExecutor(max_workers=RETRY_WORKERS) as ex:
+            for item, hit, err in ex.map(one, retry):
+                if err:
+                    failed.append(item)
+                elif hit:
+                    hits.append(hit)
+    order = {name: i for i, (name, _) in enumerate(candidates)}
+    hits.sort(key=lambda h: order.get(h.name, 0))
+    return hits, len(failed)
 
 
 # ----------------------------------------------------------------------- регистрация (RDAP/WHOIS)
@@ -245,9 +262,10 @@ def registration(name: str) -> tuple[dt.datetime | None, str, str]:
 
 # ----------------------------------------------------------------------- Certificate Transparency
 
-def ct_entries(keyword: str, timeout: float = 30) -> list[dict]:
+def ct_entries(keyword: str, timeout: float = 60) -> list[dict]:
     q = urllib.parse.quote(f"%{keyword}%")
-    r = fetch(f"https://crt.sh/?q={q}&output=json&exclude=expired", timeout=timeout, max_body=8 * 1024 * 1024)
+    r = fetch(f"https://crt.sh/?q={q}&output=json&exclude=expired", timeout=timeout, max_body=8 * 1024 * 1024,
+              retries=1)
     if r.status != 200:
         raise RuntimeError(f"crt.sh ответил {r.status}")
     data = json.loads(r.text or "[]")
@@ -318,6 +336,8 @@ def analyze_hits(hits: list[Hit], checked: int, now: dt.datetime | None = None) 
         title = f"Домен-двойник: {h.name}"
         if fresh:
             title += f" (зарегистрирован {age} дн. назад)"
+        if not h.mx_known:
+            what += "; почту проверить не удалось"
         tech = []
         if h.ips:
             tech.append("A: " + ", ".join(h.ips[:3]))
@@ -352,6 +372,30 @@ def analyze_hits(hits: list[Hit], checked: int, now: dt.datetime | None = None) 
     return out
 
 
+SUMMARY_ID = "brand.summary"
+
+
+def summary(checked: int, unresolved: int, registered: int, ct_state: str, ct_found: int, keywords: list[str]) -> Finding:
+    """Служебная сводка для раздела отчёта «Двойники и фишинг». ct_state: ok / error / skipped / off."""
+    return Finding(SUMMARY_ID, CAT, INFO, f"Проверено похожих доменов: {checked - unresolved} из {checked}",
+                   tech=f"checked={checked};unresolved={unresolved};registered={registered};ct={ct_state};"
+                        f"ct_found={ct_found};keywords={','.join(keywords)}")
+
+
+def parse_summary(f: Finding) -> dict:
+    out: dict = {}
+    for part in f.tech.split(";"):
+        k, _, v = part.partition("=")
+        out[k] = v
+    for k in ("checked", "unresolved", "registered", "ct_found"):
+        try:
+            out[k] = int(out.get(k, 0))
+        except ValueError:
+            out[k] = 0
+    out["keywords"] = [x for x in str(out.get("keywords", "")).split(",") if x]
+    return out
+
+
 def keywords_for(domain: str, extra: list[str]) -> list[str]:
     label, _ = split_domain(domain)
     kws = [] if label.startswith("xn--") else [label]
@@ -376,27 +420,33 @@ def run(domain: str, resolver: Resolver, keywords: list[str] | None = None, trus
             h.created, h.registrar, h.abuse = registration(h.name)
     out = analyze_hits(hits, len(cands))
     if errors:
+        for f in out:
+            if f.id == "brand.lookalike.ok":   # «не найдено» — только среди тех, что удалось проверить
+                f.title = f"Среди проверенных {len(cands) - errors} из {len(cands)} вариантов двойников не найдено"
         out.append(Finding("brand.lookalike.error.dns", CAT, INFO,
-                           f"Часть вариантов не проверена: DNS не ответил на {errors} из {len(cands)}"))
+                           f"Часть вариантов не проверена: DNS не ответил на {errors} из {len(cands)}",
+                           detail="Обычно это перегруженная или фильтрующая сеть (университет, гостиница, гостевой Wi-Fi). "
+                                  "Повторите «Только двойники» из другой сети."))
 
     kws = keywords_for(domain, keywords or [])
-    if not ct:
-        return out
-    if not kws:
+    ct_state, ct_found = ("off" if not ct else "skipped" if not kws else "ok"), 0
+    if ct and not kws:
         out.append(Finding("brand.ct.skipped", CAT, INFO, "Поиск по журналам сертификатов пропущен",
                            detail="Название слишком короткое (меньше 5 символов) — было бы много ложных совпадений. "
                                   "Добавьте ключевые слова бренда в карточке клиента."))
-        return out
-    for kw in kws:
-        log(f"Двойники: журналы сертификатов по «{kw}»…")
+    for kw in (kws if ct else []):
+        log(f"Двойники: журналы сертификатов по «{kw}» (crt.sh, до 2 минут)…")
         try:
             entries = ct_entries(kw)
         except Exception as e:  # noqa: BLE001 — crt.sh часто перегружен
+            ct_state = "error"
             out.append(Finding("brand.ct.error", CAT, INFO, f"Журналы сертификатов (crt.sh) не ответили по «{kw}»",
                                detail="Повторите позже — сервис бесплатный и иногда перегружен.", tech=str(e)[:200]))
             continue
         cts = analyze_ct(entries, [kw], [domain], trusted, {h.name for h in hits})
+        ct_found += len(cts)
         out += cts[:MAX_REPORTED]
         if not cts:
             out.append(Finding(f"brand.ct.ok.{kw}", CAT, OK, f"Чужих сертификатов с «{kw}» не найдено"))
+    out.insert(0, summary(len(cands), errors, len(hits), ct_state, ct_found, kws))
     return out

@@ -85,7 +85,7 @@ def _whois(server: str, query: str, timeout: float = 10) -> str:
 def lookup_expiry(domain: str) -> tuple[dt.datetime | None, str]:
     """Возвращает (дата окончания, источник). Сначала RDAP, потом WHOIS."""
     try:
-        r = fetch(f"https://rdap.org/domain/{domain}", follow=3, timeout=10)
+        r = fetch(f"https://rdap.org/domain/{domain}", follow=3, timeout=15, retries=1)
         if r.status == 200:
             d = expiry_from_rdap(json.loads(r.text))
             if d:

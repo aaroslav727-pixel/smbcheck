@@ -1,12 +1,16 @@
 """HTTP-запросы без автоматических редиректов (стандартная библиотека)."""
 from __future__ import annotations
 
+import socket
 import ssl
+import time
 import urllib.parse
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from email.message import Message
+
+from .tlsctx import context as ssl_context
 
 USER_AGENT = "Mozilla/5.0 (compatible; SMBCheck/0.1; authorized security check)"
 MAX_BODY = 256 * 1024
@@ -37,16 +41,37 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _opener(verify: bool) -> urllib.request.OpenerDirector:
-    ctx = ssl.create_default_context()
-    if not verify:
+    if verify:
+        ctx = ssl_context()
+    else:
+        ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
     return urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler(context=ctx))
 
 
 def fetch(url: str, *, follow: int = 0, verify: bool = True, timeout: float = 10.0,
-          max_body: int = MAX_BODY) -> HttpResponse:
-    """GET url; follow — сколько редиректов пройти. Исключения сети пробрасываются."""
+          max_body: int = MAX_BODY, retries: int = 0) -> HttpResponse:
+    """GET url; follow — сколько редиректов пройти. Исключения сети пробрасываются.
+
+    retries — сколько раз повторить при таймауте/обрыве или ответе 429/5xx (для внешних API).
+    """
+    for attempt in range(retries + 1):
+        try:
+            r = _fetch_once(url, follow, verify, timeout, max_body)
+        except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError, ssl.SSLError) as e:
+            if attempt >= retries or isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
+                raise
+        else:
+            if r.status in (429, 500, 502, 503, 504) and attempt < retries:
+                time.sleep(2 * (attempt + 1))
+                continue
+            return r
+        time.sleep(1 + attempt)
+    raise RuntimeError("unreachable")
+
+
+def _fetch_once(url: str, follow: int, verify: bool, timeout: float, max_body: int) -> HttpResponse:
     opener = _opener(verify)
     chain: list[tuple[int, str]] = []
     current = url

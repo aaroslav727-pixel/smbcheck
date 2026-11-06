@@ -10,11 +10,11 @@ if errorlevel 1 (
   exit /b 1
 )
 
-python -m pip install --upgrade pip pyinstaller pytest || goto :err
+python -m pip install --upgrade pip pyinstaller pytest certifi || goto :err
 python -m pytest -q || goto :err
 
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name SMBCheck app.py || goto :err
-python -m PyInstaller --noconfirm --onefile --console --name SMBCheck-cli app.py || goto :err
+python -m PyInstaller --noconfirm --clean --onefile --windowed --collect-data certifi --name SMBCheck app.py || goto :err
+python -m PyInstaller --noconfirm --onefile --console --collect-data certifi --name SMBCheck-cli app.py || goto :err
 
 echo.
 echo Готово: dist\SMBCheck.exe и dist\SMBCheck-cli.exe

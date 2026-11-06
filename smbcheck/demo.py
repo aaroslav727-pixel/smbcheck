@@ -35,7 +35,11 @@ def demo_results() -> tuple[ScanResult, ScanResult]:
     prev = ScanResult("romashka-demo.ru", "ООО «Ромашка» (пример)",
                       started=(now - dt.timedelta(days=30)).isoformat(),
                       finished=(now - dt.timedelta(days=30)).isoformat(),
-                      findings=prev_findings, checks_run=["email", "web", "domain", "network", "leaks"])
+                      findings=prev_findings + [
+                          _f("brand.summary", "brand", INFO, "Проверено похожих доменов: 141 из 141",
+                             tech="checked=141;unresolved=0;registered=0;ct=ok;ct_found=0;keywords=romashka-demo"),
+                          _f("brand.lookalike.ok", "brand", OK, "Зарегистрированных двойников не найдено (141 вариантов)")],
+                      checks_run=["email", "web", "domain", "network", "leaks", "brand"])
     prev.score, prev.grade = score(prev.findings)
 
     cur_findings = [
@@ -80,8 +84,22 @@ def demo_results() -> tuple[ScanResult, ScanResult]:
            why="Если сотрудник использовал этот пароль и для рабочей почты, ящик могут взломать.",
            fix="Смените пароль от этого ящика и везде, где он повторялся; включите двухфакторный вход."),
     ]
+    cur_findings += [
+        _f("brand.summary", "brand", INFO, "Проверено похожих доменов: 141 из 141",
+           tech="checked=141;unresolved=0;registered=2;ct=ok;ct_found=0;keywords=romashka-demo"),
+        _f("brand.lookalike.romashka-demo-online.ru", "brand", HIGH,
+           "Домен-двойник: romashka-demo-online.ru (зарегистрирован 4 дн. назад)",
+           detail="Как получен: добавлено слово. Состояние: работает сайт и настроена почта — можно и показывать "
+                  "поддельную страницу, и рассылать письма.",
+           tech="A: 45.12.88.10; MX: mx.romashka-demo-online.ru; регистратор: Example Registrar; "
+                "жалобы: abuse@registrar.example"),
+        _f("brand.lookalike.romashka-demo.com", "brand", LOW, "Домен-двойник: romashka-demo.com",
+           detail="Как получен: другая зона .com. Состояние: припаркован (выставлен на продажу или не используется).",
+           tech="NS: ns1.sedoparking.com"),
+        _f("brand.ct.ok.romashka-demo", "brand", OK, "Чужих сертификатов с «romashka-demo» не найдено"),
+    ]
     cur = ScanResult("romashka-demo.ru", "ООО «Ромашка» (пример)", started=now.isoformat(), finished=now.isoformat(),
-                     findings=cur_findings, checks_run=["email", "web", "domain", "network", "leaks"])
+                     findings=cur_findings, checks_run=["email", "web", "domain", "network", "leaks", "brand"])
     cur.score, cur.grade = score(cur.findings)
     return cur, prev
 
@@ -111,7 +129,7 @@ def demo_fin() -> tuple[Client, list[ScanResult]]:
     for months_ago, src in ((2, base_prev), (1, base_prev), (0, base_cur)):
         t = now - dt.timedelta(days=30 * months_ago)
         fs = [Finding.from_dict({k: (v.replace("romashka-demo.ru", FIN_DOMAIN) if isinstance(v, str) else v)
-                                 for k, v in f.to_dict().items()}) for f in src.findings]
+                                 for k, v in f.to_dict().items()}) for f in src.findings if f.category != "brand"]
         if months_ago == 0:
             fs.append(_brand("tezkredit-online.uz", HIGH, "добавлено слово", "работает сайт и настроена почта",
                              "A: 45.12.88.10; MX: mx.tezkredit-online.uz; регистратор: Example Registrar; создан: "
@@ -119,6 +137,9 @@ def demo_fin() -> tuple[Client, list[ScanResult]]:
             fs.append(_brand("tezkredit.top", MEDIUM, "другая зона .top", "на нём работает сайт", "A: 104.21.3.7"))
         else:
             fs.append(_f("brand.lookalike.ok", "brand", OK, "Зарегистрированных двойников не найдено (180 вариантов)"))
+        fs.append(_f("brand.summary", "brand", INFO, "Проверено похожих доменов: 180 из 180",
+                     tech=f"checked=180;unresolved=0;registered={2 if months_ago == 0 else 0};ct=ok;ct_found=0;"
+                          "keywords=tezkredit"))
         r = ScanResult(FIN_DOMAIN, c.name, started=t.isoformat(), finished=t.isoformat(), findings=fs,
                        checks_run=["email", "web", "domain", "network", "leaks", "brand"])
         r.score, r.grade = score(r.findings)

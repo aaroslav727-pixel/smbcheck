@@ -5,7 +5,8 @@ import datetime as dt
 import html
 from pathlib import Path
 
-from .models import CATEGORIES, CRITICAL, HIGH, INFO, LOW, MEDIUM, OK, SEVERITY_ORDER, SEVERITY_RU, ScanResult
+from .checks import brand as brand_chk
+from .models import CATEGORIES, CRITICAL, HIGH, INFO, LOW, MEDIUM, OK, SEVERITY_ORDER, SEVERITY_RU, Finding, ScanResult
 from .scoring import PARTIAL, Diff, category_status, is_gap, sort_key, top_actions
 from .storage import Client, Settings, display_domain
 
@@ -79,10 +80,158 @@ table{width:100%;border-collapse:collapse}
 .oklist{columns:2;font-size:13px;color:var(--muted);padding-left:18px}
 .foot{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);font-size:11.5px;color:var(--muted)}
 .break{break-before:page}
+.lead{font-size:13.5px;color:var(--muted);margin:0 0 12px}
+.ph{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.pc{border:1px solid var(--line);border-top:4px solid var(--c);border-radius:6px;padding:10px 12px;break-inside:avoid}
+.pc .pk{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+.pc .pv{font-weight:700;color:var(--c);margin:2px 0 4px;font-size:15px}
+.pc .pd{font-size:12.5px}
+.tw{margin-top:12px}
+.tw th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);padding:6px 4px;border-bottom:2px solid var(--line)}
+.tw td{padding:7px 4px;border-bottom:1px solid var(--line);vertical-align:top;font-size:13px}
+.tw tr{break-inside:avoid}
+.ex{font:12px/1.6 Consolas,"Courier New",monospace;color:var(--ink)}
+.cols2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}
+@media (max-width:640px){.ph,.cols2,.changes{grid-template-columns:1fr}.page{padding:24px 16px}}
 .screen-only{font-size:12px;color:var(--muted);text-align:center;margin:10px}
 @media print{body{background:#fff}.page{box-shadow:none;margin:0;padding:0;max-width:none}.screen-only{display:none}
 @page{size:A4;margin:14mm}}
 """
+
+
+# ---------------------------------------------------------------- фишинг
+
+def _brand_summary(result: ScanResult) -> dict | None:
+    for f in result.findings:
+        if f.id == brand_chk.SUMMARY_ID:
+            return brand_chk.parse_summary(f)
+    return None
+
+
+def _mail_spoofing(result: ScanResult, domain: str) -> tuple[str, str, str]:
+    """(цвет, вывод, пояснение) — можно ли отправить письмо от имени домена."""
+    if "email" not in result.checks_run:
+        return COLORS[""], "Не проверялось", "Проверка почты в этот раз не запускалась."
+    ids = {f.id: f for f in result.findings if f.category == "email"}
+    if "email.dmarc.missing" in ids or "email.dmarc.multiple" in ids:
+        return (COLORS[HIGH], "Можно подделать",
+                f"DMARC не работает: письмо мошенника с адресом @{domain} дойдёт до ваших клиентов как настоящее.")
+    if "email.dmarc.none" in ids:
+        return (COLORS[MEDIUM], "Можно подделать",
+                "DMARC только наблюдает (p=none): поддельные письма от вашего имени доставляются. "
+                "Нужен режим quarantine или reject.")
+    ok = ids.get("email.dmarc.ok")
+    if ok and "reject" in ok.title:
+        return COLORS[OK], "Защищено", "DMARC в режиме reject: почтовые сервисы отклоняют письма-подделки."
+    if ok and "quarantine" in ok.title:
+        return (COLORS[LOW], "Частично защищено",
+                "DMARC в режиме quarantine: подделки уходят в спам. Следующий шаг — reject.")
+    return COLORS[""], "Нет данных", "Запись DMARC прочитать не удалось."
+
+
+def _what_on(f: Finding) -> str:
+    m = f.detail.split("Состояние: ", 1)
+    return m[1].rstrip(".") if len(m) == 2 else f.detail
+
+
+def _examples(domain: str, trusted: list[str]) -> list[tuple[str, str]]:
+    """По одному примеру каждого вида искажения — чтобы клиенту было понятно, что искали."""
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for name, how in brand_chk.generate_lookalikes(domain, trusted):
+        kind = "другая зона" if how.startswith("другая зона") else how
+        if kind in seen:
+            continue
+        seen.add(kind)
+        out.append((name, kind))
+    return out[:8]
+
+
+def phishing_section(result: ScanResult, client: Client) -> str:
+    dom = display_domain(result.domain)
+    sm = _brand_summary(result)
+    brand_run = "brand" in result.checks_run
+    found = sorted([f for f in result.findings if f.category == "brand" and f.is_problem and f.id != brand_chk.SUMMARY_ID],
+                   key=sort_key)
+    lookalikes = [f for f in found if f.id.startswith("brand.lookalike.")]
+    certs = [f for f in found if f.id.startswith("brand.ct.")]
+    more = next((f for f in result.findings if f.id == "brand.lookalike.more"), None)
+
+    p: list[str] = []
+    a = p.append
+    a("<h2>Фишинг от вашего имени</h2>")
+    a("<p class='lead'>Мошенники обманывают клиентов двумя путями: присылают письма, будто бы от вас, и создают сайты "
+      "с похожими адресами, где просят ввести пароль, данные карты или код из SMS. Ниже — насколько вы защищены "
+      "от обоих путей.</p><div class='ph'>")
+
+    c, v, d = _mail_spoofing(result, dom)
+    a(f"<div class='pc' style='--c:{c}'><div class='pk'>Письма от вашего имени</div><div class='pv'>{e(v)}</div>"
+      f"<div class='pd'>{e(d)}</div></div>")
+
+    if not brand_run or not sm:
+        c, v, d = COLORS[""], "Не проверялось", "Проверка двойников в этот раз не запускалась."
+    else:
+        n_ok = sm["checked"] - sm["unresolved"]
+        hot = [f for f in lookalikes if f.severity in (CRITICAL, HIGH, MEDIUM)]
+        if hot:
+            c, v = COLORS[HIGH], f"Найдено: {len(lookalikes)}"
+            d = f"Из них с сайтом или почтой — {len(hot)}. Список ниже."
+        elif lookalikes:
+            c, v = COLORS[LOW], f"Зарегистрировано: {len(lookalikes)}"
+            d = "Сайта и почты на них пока нет или они припаркованы — продолжаем следить."
+        elif sm["unresolved"]:
+            c, v = COLORS[PARTIAL], "Проверено частично"
+            d = (f"Проверено {n_ok} из {sm['checked']} вариантов, двойников среди них нет. "
+                 f"Остальные {sm['unresolved']} не удалось проверить из-за сети — повторим.")
+        else:
+            c, v = COLORS[OK], "Не найдено"
+            d = f"Проверено {sm['checked']} похожих адресов — ни один не зарегистрирован."
+    a(f"<div class='pc' style='--c:{c}'><div class='pk'>Похожие домены</div><div class='pv'>{e(v)}</div>"
+      f"<div class='pd'>{e(d)}</div></div>")
+
+    kws = ", ".join(f"«{k}»" for k in (sm or {}).get("keywords", []))
+    st = (sm or {}).get("ct", "off")
+    if not brand_run or not sm or st == "off":
+        c, v, d = COLORS[""], "Не проверялось", "Поиск по журналам сертификатов не запускался."
+    elif st == "skipped":
+        c, v, d = COLORS[""], "Пропущено", "Название короче 5 символов. Добавьте слова бренда в карточке клиента."
+    elif certs:
+        c, v, d = COLORS[MEDIUM], f"Найдено: {len(certs)}", f"Сертификаты на чужие адреса с {kws}. Список ниже."
+    elif st == "error":
+        c, v, d = COLORS[PARTIAL], "Сервис не ответил", "Журналы сертификатов (crt.sh) были недоступны — повторим в следующий раз."
+    else:
+        c, v, d = COLORS[OK], "Не найдено", f"Чужих сертификатов с {kws} нет."
+    a(f"<div class='pc' style='--c:{c}'><div class='pk'>Сертификаты с вашим названием</div><div class='pv'>{e(v)}</div>"
+      f"<div class='pd'>{e(d)}</div></div></div>")
+
+    if found:
+        a("<table class='tw'><thead><tr><th>Адрес</th><th>Что на нём</th><th style='width:110px'>Важность</th></tr></thead><tbody>")
+        for f in lookalikes + certs:
+            name = f.title.split(": ", 1)[-1]
+            what = _what_on(f) if f.id.startswith("brand.lookalike.") else f.detail
+            a(f"<tr><td><b>{e(name)}</b><div class='tech'>{e(f.tech)}</div></td><td>{e(what)}</td>"
+              f"<td class='sev' style='--c:{COLORS[f.severity]}'>{SEVERITY_RU[f.severity]}</td></tr>")
+        if more:
+            a(f"<tr><td colspan='3' class='tech'>{e(more.title)}: {e(more.tech)}</td></tr>")
+        a("</tbody></table>")
+        a("<div class='box' style='margin-top:10px'><b>Что делать с найденным</b><ol style='margin:0;padding-left:18px'>"
+          "<li>Откройте адрес в изолированной среде (ничего не вводя) и сделайте скриншоты.</li>"
+          "<li>Если это подделка — жалоба регистратору и хостингу (черновик готовим мы), предупреждение клиентам "
+          "на сайте и в соцсетях, для финорганизаций — уведомление регулятору.</li>"
+          "<li>Если адрес ваш или партнёрский — сообщите нам, и мы перестанем считать его двойником.</li></ol></div>")
+
+    if brand_run and sm:
+        ex = _examples(result.domain, client.trusted_domains)
+        a("<div class='cols2'><div class='box'><b>Что мы искали</b>"
+          f"{sm['checked']} вариантов вашего адреса, например:<div class='ex'>"
+          + "<br>".join(f"{e(n)} <span style='color:#6b7280'>— {e(k)}</span>" for n, k in ex) + "</div>"
+          + (f"<div style='margin-top:6px'>И сертификаты, где встречается {kws}.</div>" if kws else "") + "</div>")
+        a("<div class='box'><b>Что не проверяется автоматически</b><ul>"
+          "<li>Страницы и аккаунты в соцсетях и мессенджерах от вашего имени</li>"
+          "<li>Поддельные мобильные приложения</li><li>SMS и звонки мошенников</li>"
+          "<li>Адреса, совсем не похожие на ваш (найдутся, только если в сертификате есть ваше название)</li>"
+          "</ul></div></div>")
+    return "".join(p)
 
 
 def render_html(result: ScanResult, client: Client, settings: Settings, d: Diff | None = None) -> str:
@@ -92,8 +241,8 @@ def render_html(result: ScanResult, client: Client, settings: Settings, d: Diff 
     actions = top_actions(result.findings, 3)
     status = category_status(result.findings, result.checks_run)
     problems = sorted([f for f in result.findings if f.is_problem], key=sort_key)
-    oks = [f for f in result.findings if f.severity == OK]
-    infos = [f for f in result.findings if f.severity == INFO and not is_gap(f)]
+    oks = [f for f in result.findings if f.severity == OK and f.category != "brand"]
+    infos = [f for f in result.findings if f.severity == INFO and not is_gap(f) and f.category != "brand"]
 
     p: list[str] = []
     a = p.append
@@ -122,9 +271,11 @@ def render_html(result: ScanResult, client: Client, settings: Settings, d: Diff 
             a(f"<p class='box' style='margin-top:10px;border-left:4px solid {COLORS[HIGH]}'><b>Найдены двойники бренда: "
               f"{len(brand)}</b>" + (f", из них с сайтом или почтой — {hi}" if hi else "") +
               ". Это не ваши настройки, поэтому на оценку не влияет, но через такие домены обманывают ваших клиентов. "
-              "Список — в разделе «Подробности», черновики жалоб и уведомлений — отдельным документом.</p>")
+              "Список — в разделе «Фишинг от вашего имени», черновики жалоб и уведомлений — отдельным документом.</p>")
         else:
-            a("<p class='box' style='margin-top:10px'>Двойников бренда не найдено.</p>")
+            sm = _brand_summary(result)
+            part = f" среди проверенных {sm['checked'] - sm['unresolved']} из {sm['checked']}" if sm and sm["unresolved"] else ""
+            a(f"<p class='box' style='margin-top:10px'>Двойников бренда не найдено{part}. Подробнее — в разделе «Фишинг от вашего имени».</p>")
 
     a("<h2>Что сделать в этом месяце</h2>")
     if actions:
@@ -162,12 +313,16 @@ def render_html(result: ScanResult, client: Client, settings: Settings, d: Diff 
         a("<ul>" + "".join(f"<li>{e(f.title)}</li>" for f in d.new) + "</ul>" if d.new else "—")
         a("</div></div>")
 
-    # ---------- подробности
+    if "brand" in result.checks_run or "email" in result.checks_run:
+        a(phishing_section(result, client))
+
+    # ---------- подробности (двойники подробно описаны в разделе о фишинге)
+    detail_problems = [f for f in problems if f.category != "brand"]
     a("<div class='break'></div><h2>Подробности</h2><div class='det'>")
-    if not problems:
+    if not detail_problems:
         a("<p>Замечаний нет.</p>")
     for cat, label in CATEGORIES.items():
-        items = [f for f in problems if f.category == cat]
+        items = [f for f in detail_problems if f.category == cat]
         if not items:
             continue
         a(f"<h3>{e(label)}</h3>")

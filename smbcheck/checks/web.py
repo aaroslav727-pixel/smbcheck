@@ -9,6 +9,7 @@ import ssl
 from ..dnsclient import Resolver
 from ..models import CRITICAL, HIGH, INFO, LOW, MEDIUM, OK, Finding
 from ..net import HttpResponse, fetch
+from ..tlsctx import context as ssl_context
 
 CAT = "web"
 
@@ -17,7 +18,7 @@ CAT = "web"
 
 def tls_info(host: str, port: int = 443, timeout: float = 8.0) -> dict:
     """Проверка сертификата с полной валидацией, как это делает браузер."""
-    ctx = ssl.create_default_context()
+    ctx = ssl_context()
     try:
         with socket.create_connection((host, port), timeout=timeout) as sock:
             with ctx.wrap_socket(sock, server_hostname=host) as ss:

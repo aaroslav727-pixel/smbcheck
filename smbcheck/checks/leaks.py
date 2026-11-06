@@ -12,6 +12,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from ..tlsctx import context as ssl_context
+
 from ..models import HIGH, INFO, LOW, MEDIUM, OK, Finding
 
 CAT = "leaks"
@@ -19,16 +21,26 @@ API = "https://haveibeenpwned.com/api/v3"
 UA = "SMBCheck-security-report"
 
 
-def _get(path: str, key: str = "", timeout: float = 15) -> tuple[int, object]:
+def _get(path: str, key: str = "", timeout: float = 25, retries: int = 2) -> tuple[int, object]:
+    """(HTTP-код, JSON). Таймауты и обрывы повторяются; после последней попытки — исключение."""
     headers = {"User-Agent": UA}
     if key:
         headers["hibp-api-key"] = key
-    req = urllib.request.Request(API + path, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, json.loads(r.read().decode() or "null")
-    except urllib.error.HTTPError as e:
-        return e.code, None
+    for attempt in range(retries + 1):
+        req = urllib.request.Request(API + path, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=ssl_context()) as r:
+                return r.status, json.loads(r.read().decode() or "null")
+        except urllib.error.HTTPError as e:
+            if e.code in (502, 503, 504) and attempt < retries:
+                time.sleep(2 * (attempt + 1))
+                continue
+            return e.code, None
+        except (urllib.error.URLError, TimeoutError, OSError):
+            if attempt >= retries:
+                raise
+            time.sleep(2 * (attempt + 1))
+    return 0, None
 
 
 def analyze_site_breaches(domain: str, breaches: list[dict]) -> list[Finding]:
@@ -70,11 +82,17 @@ def analyze_account_breaches(results: dict[str, list[dict]], now: dt.date | None
 def run(domain: str, emails: list[str], api_key: str = "", log=lambda m: None) -> list[Finding]:
     out: list[Finding] = []
     log("Утечки: взломы сайта по базе HIBP…")
-    status, data = _get("/breaches?domain=" + urllib.parse.quote(domain))
+    try:
+        status, data = _get("/breaches?domain=" + urllib.parse.quote(domain))
+        tech = f"HTTP {status}"
+    except Exception as e:  # noqa: BLE001
+        status, data, tech = 0, None, str(e)[:200]
     if status == 200 and isinstance(data, list):
         out += analyze_site_breaches(domain, data)
     else:
-        out.append(Finding("leaks.site.error", CAT, INFO, "Базу утечек HIBP проверить не удалось", tech=f"HTTP {status}"))
+        out.append(Finding("leaks.site.error", CAT, INFO, "Базу утечек HIBP проверить не удалось",
+                           detail="Сервис не ответил (сеть или сам сервис). Повторите проверку позже или из другой сети.",
+                           tech=tech))
 
     emails = [e.strip() for e in emails if e.strip()]
     if not emails:
@@ -97,7 +115,12 @@ def run(domain: str, emails: list[str], api_key: str = "", log=lambda m: None) -
         if i:
             time.sleep(6.5)  # лимит самого дешёвого тарифа HIBP — 10 запросов в минуту
         log(f"Утечки: {email}…")
-        status, data = _get(f"/breachedaccount/{urllib.parse.quote(email)}?truncateResponse=false", api_key)
+        try:
+            status, data = _get(f"/breachedaccount/{urllib.parse.quote(email)}?truncateResponse=false", api_key)
+        except Exception as e:  # noqa: BLE001
+            out.append(Finding(f"leaks.account.error.{email}", CAT, INFO, f"Не удалось проверить {email}",
+                               tech=str(e)[:200]))
+            continue
         if status == 200 and isinstance(data, list):
             results[email] = data
         elif status == 404:

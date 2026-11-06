@@ -1,7 +1,9 @@
 """Мини DNS-клиент без внешних зависимостей.
 
 Спрашивает публичные резолверы (так мы видим домен так же, как его видит весь интернет),
-по UDP, при обрезанном ответе — по TCP, а если порт 53 закрыт — через DNS-over-HTTPS.
+по UDP, при обрезанном ответе — по TCP. Если сеть режет внешний DNS (университет, гостиница,
+офис с жёстким фаерволом), по очереди пробует: DNS-сервер, который выдала сама сеть,
+DNS-over-HTTPS и, для A/AAAA, системный резолвер Windows.
 """
 from __future__ import annotations
 
@@ -11,9 +13,13 @@ import random
 import re
 import socket
 import struct
+import sys
+import threading
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
+
+from .tlsctx import context as ssl_context
 
 TYPES = {"A": 1, "NS": 2, "CNAME": 5, "SOA": 6, "MX": 15, "TXT": 16, "AAAA": 28, "DS": 43, "CAA": 257}
 TYPE_NAMES = {v: k for k, v in TYPES.items()}
@@ -22,7 +28,11 @@ RESOLVERS = ["1.1.1.1", "8.8.8.8", "9.9.9.9"]
 DOH_ENDPOINTS = [
     "https://cloudflare-dns.com/dns-query",
     "https://dns.google/resolve",
+    "https://1.1.1.1/dns-query",                 # без DNS-имени — если сеть не даёт разрешить cloudflare-dns.com
+    "https://dns.quad9.net:5053/dns-query",
 ]
+FAIL_LIMIT = 3          # столько провалов подряд — сервер временно пропускаем
+REPROBE_EVERY = 25      # раз в столько запросов снова пробуем «упавшие» серверы
 
 NOERROR, NXDOMAIN = 0, 3
 
@@ -186,18 +196,110 @@ def parse_doh_json(data: dict, rtype: str) -> DNSAnswer:
 def _doh(url: str, name: str, rtype: str, timeout: float) -> DNSAnswer:
     full = url + "?" + urllib.parse.urlencode({"name": name, "type": rtype})
     req = urllib.request.Request(full, headers={"Accept": "application/dns-json", "User-Agent": "SMBCheck"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with urllib.request.urlopen(req, timeout=timeout, context=ssl_context()) as r:
         return parse_doh_json(json.loads(r.read().decode()), rtype)
+
+
+# коды getaddrinfo: «такого имени нет» и «имя есть, но адресов этого типа нет» (POSIX и Windows)
+_GAI_NONAME = {getattr(socket, "EAI_NONAME", -2), 11001}
+_GAI_NODATA = {getattr(socket, "EAI_NODATA", -5), 11004}
+
+
+def _system_lookup(name: str, rtype: str) -> DNSAnswer:
+    """A/AAAA через резолвер операционной системы — последний запасной путь."""
+    fam = socket.AF_INET if rtype == "A" else socket.AF_INET6
+    try:
+        infos = socket.getaddrinfo(name, None, fam, socket.SOCK_STREAM)
+    except socket.gaierror as e:
+        if e.errno in _GAI_NODATA:
+            return DNSAnswer()
+        if e.errno in _GAI_NONAME:
+            return DNSAnswer(rcode=NXDOMAIN)
+        raise
+    return DNSAnswer(records=[(rtype, ip) for ip in dict.fromkeys(str(i[4][0]) for i in infos)])
+
+
+def _valid_ipv4(s: str) -> bool:
+    try:
+        return isinstance(ipaddress.ip_address(s), ipaddress.IPv4Address)
+    except ValueError:
+        return False
+
+
+def system_dns_servers() -> list[str]:
+    """DNS-серверы, которые выдала текущая сеть (реестр Windows или /etc/resolv.conf)."""
+    found: list[str] = []
+    if sys.platform == "win32":
+        try:
+            import winreg
+            base = r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces"
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base) as k:
+                for i in range(winreg.QueryInfoKey(k)[0]):
+                    try:
+                        with winreg.OpenKey(k, winreg.EnumKey(k, i)) as sk:
+                            for val in ("NameServer", "DhcpNameServer"):
+                                try:
+                                    v, _ = winreg.QueryValueEx(sk, val)
+                                except OSError:
+                                    continue
+                                found += re.split(r"[\s,]+", str(v).strip())
+                    except OSError:
+                        continue
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        try:
+            with open("/etc/resolv.conf", encoding="utf-8", errors="replace") as f:
+                found += [m.group(1) for m in (re.match(r"\s*nameserver\s+(\S+)", ln) for ln in f) if m]
+        except OSError:
+            pass
+    return [ip for ip in dict.fromkeys(found) if _valid_ipv4(ip) and ip not in RESOLVERS]
 
 
 # ---------------------------------------------------------------- public API
 
 class Resolver:
-    def __init__(self, servers: list[str] | None = None, timeout: float = 3.0):
-        self.servers = servers or RESOLVERS
+    """Потокобезопасен: проверка двойников делает запросы из нескольких потоков.
+
+    Сервер, который не ответил FAIL_LIMIT раз подряд, временно пропускается, а раз в
+    REPROBE_EVERY запросов снова получает шанс — так единичный сбой сети не отключает UDP
+    до конца проверки (раньше одного таймаута хватало, чтобы перейти на DoH навсегда).
+    """
+
+    def __init__(self, servers: list[str] | None = None, timeout: float = 3.0, attempts: int = 2,
+                 use_system: bool = True, doh: list[str] | None = None):
+        self.servers = list(servers or RESOLVERS)
+        if use_system and servers is None:
+            self.servers += system_dns_servers()
+        self.doh = list(DOH_ENDPOINTS if doh is None else doh)
         self.timeout = timeout
+        self.attempts = attempts
+        self.use_system = use_system
         self._cache: dict[tuple[str, str], DNSAnswer] = {}
-        self._udp_broken = False
+        self._fails: dict[str, int] = {}
+        self._lock = threading.Lock()
+        self._n = 0
+
+    # ---- здоровье серверов
+    def _healthy(self, names: list[str]) -> list[str]:
+        with self._lock:
+            self._n += 1
+            if self._n % REPROBE_EVERY == 0:
+                return list(names)
+            ok = [x for x in names if self._fails.get(x, 0) < FAIL_LIMIT]
+            return sorted(ok, key=lambda x: self._fails.get(x, 0))
+
+    def _mark(self, server: str, good: bool) -> None:
+        with self._lock:
+            self._fails[server] = 0 if good else self._fails.get(server, 0) + 1
+
+    def _udp_query(self, server: str, name: str, rtype: str) -> DNSAnswer | None:
+        qid = random.randint(0, 0xFFFF)
+        q = build_query(name, rtype, qid)
+        ans, truncated = parse_response(_udp(server, q, self.timeout), qid)
+        if truncated:
+            ans, _ = parse_response(_tcp(server, q, self.timeout), qid)
+        return ans
 
     def query(self, name: str, rtype: str) -> DNSAnswer:
         key = (name.lower().strip("."), rtype)
@@ -205,32 +307,38 @@ class Resolver:
             return self._cache[key]
         errors: list[str] = []
         ans = None
-        if not self._udp_broken:
-            for server in self.servers:
+        servers = self._healthy(self.servers)
+        for _attempt in range(self.attempts):
+            for server in servers:
                 try:
-                    qid = random.randint(0, 0xFFFF)
-                    q = build_query(key[0], rtype, qid)
-                    ans, truncated = parse_response(_udp(server, q, self.timeout), qid)
-                    if truncated:
-                        ans, _ = parse_response(_tcp(server, q, self.timeout), qid)
-                    if ans.rcode in (NOERROR, NXDOMAIN):
-                        break
-                    errors.append(f"{server}: rcode {ans.rcode}")
-                    ans = None
+                    got = self._udp_query(server, key[0], rtype)
                 except (OSError, ValueError, struct.error) as e:
+                    self._mark(server, False)
                     errors.append(f"{server}: {e}")
-                    ans = None
-            if ans is None:
-                self._udp_broken = True  # дальше сразу идём через DoH
+                    continue
+                if got.rcode in (NOERROR, NXDOMAIN):
+                    self._mark(server, True)
+                    ans = got
+                    break
+                errors.append(f"{server}: rcode {got.rcode}")   # SERVFAIL и т.п. — сервер жив, спросим другой
+            if ans is not None:
+                break
         if ans is None:
-            for url in DOH_ENDPOINTS:
+            for url in self._healthy(self.doh):
                 try:
                     ans = _doh(url, key[0], rtype, self.timeout + 3)
+                    self._mark(url, True)
                     break
                 except Exception as e:  # noqa: BLE001 — сеть может падать как угодно
+                    self._mark(url, False)
                     errors.append(f"DoH {url}: {e}")
+        if ans is None and self.use_system and rtype in ("A", "AAAA"):
+            try:
+                ans = _system_lookup(key[0], rtype)
+            except OSError as e:
+                errors.append(f"система: {e}")
         if ans is None:
-            raise DNSError(f"DNS-запрос {rtype} {name} не удался: " + "; ".join(errors[-3:]))
+            raise DNSError(f"DNS-запрос {rtype} {name} не удался: " + "; ".join(errors[-3:] or ["нет доступных серверов"]))
         self._cache[key] = ans
         return ans
 
